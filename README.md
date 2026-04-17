@@ -1,6 +1,4 @@
-# Info Debug
-
-## English Version
+# DebugRepair
 
 This project is a Java bug repair tool based on Defects4J and large language models (LLMs).
 
