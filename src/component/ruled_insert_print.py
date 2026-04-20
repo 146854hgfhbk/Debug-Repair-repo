@@ -8,8 +8,8 @@ def ruled_insert_print_pipeline(
     bug_id: str,
     bug_info: BugInfo,
 ):
-    start_marker = f"// DEBUG_MARKER_START"
-    end_marker = f"// DEBUG_MARKER_END"
+    start_marker = f"// START_DEBUG"
+    end_marker = f"// END_DEBUG"
 
     inserted_code = ""
 
