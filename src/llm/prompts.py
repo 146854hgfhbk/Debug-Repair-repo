@@ -5,7 +5,7 @@ class Prompts:
     """
     # 仅提供 buggy func 的空白对照
     EASY_REPAIR = """
-    Your mission is to repair the provided buggy Java function using the context below.
+    Your mission is to repair the provided buggy Java function.
     
     **Buggy Java Function:**
     ```java
@@ -24,6 +24,8 @@ class Prompts:
     **Buggy Java Function:**
     ```java
     {buggy_function}
+
+    Buggy lines are marked with '// Buggy Line' as hints. The actual fix may involve changes around these lines or adding new statements if necessary.
     
     **Bug Context:**
     1.  **Failing Test Context:**
