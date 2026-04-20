@@ -795,8 +795,8 @@ def rule_based_instrument_method(
 
 def rule_insert_print(
     bug_info: BugInfo,
-    start_marker: str = "DEBUG_START",
-    end_marker: str = "DEBUG_END"
+    start_marker: str = "START_DEBUG",
+    end_marker: str = "END_DEBUG"
 ) -> str:
     """插桩函数：在方法体的关键位置插入调试输出语句。"""
     try:
