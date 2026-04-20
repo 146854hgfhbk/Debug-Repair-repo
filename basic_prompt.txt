@@ -1,0 +1,12 @@
+"""
+    Your mission is to repair the provided buggy Java function.
+    
+    **Buggy Java Function:**
+    ```java
+    {buggy_function}
+
+    Buggy lines are marked with '// Buggy Line' as hints. The actual fix may involve changes around these lines or adding new statements if necessary.
+
+    CRITICAL OUTPUT FORMAT:
+    Your response must enclose the entire function within a ```java ... ``` code block.
+"""
