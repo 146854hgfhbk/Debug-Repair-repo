@@ -176,3 +176,16 @@ class ClientConfig:
     CUSTOM = True
     CUSTOM_LIST = [1, 2, 5, 10]
 ```
+
+## Results
+
+| Category | APR Method | Defects4J-V1.2 SF | Defects4J-V1.2 SH | Defects4J-V1.2 SL | Defects4J-V2.0 SF | Defects4J-V2.0 SH | Defects4J-V2.0 SL | Total |
+|---|---|---|---|---|---|---|---|---|
+| Basic | BaseDeepSeek | 82/112 | 59/76 | 36/46 | 73/91 | 56/70 | 31/40 | 155/203 |
+| Retrieval-based | RepairAgent | 85/93 | 67/73 | 48/52 | 87/94 | 72/78 | 45/48 | 172/187 |
+| Retrieval-based | ReinFix | 118/181 | 83/120 | 47/66 | 118/171 | 89/128 | 47/63 | 236/352 |
+| Hybrid | ThinkRepair | 87/122 | 66/89 | 38/48 | 93/129 | 68/98 | 35/51 | 180/251 |
+| Feedback-based | ChatRepair | 103/156 | 51/67 | 45/56 | - | - | 42/53 | 145/209 |
+| Feedback-based | ContrastRepair | 133/182 | 86/124 | 60/69 | - | - | 48/66 | 181/248 |
+| Feedback-based | TSAPR | 108/146 | 87/115 | 50/66 | 116/150 | 89/114 | 46/63 | 224/296 |
+| Feedback-based | **DebugRepair** | 139/179 | 98/122 | 57/65 | **156/180** | **113/129** | **61/65** | **295/359** |
