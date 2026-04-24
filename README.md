@@ -179,13 +179,113 @@ class ClientConfig:
 
 ## Results
 
-| Category | APR Method | Defects4J-V1.2 SF | Defects4J-V1.2 SH | Defects4J-V1.2 SL | Defects4J-V2.0 SF | Defects4J-V2.0 SH | Defects4J-V2.0 SL | Total |
-|---|---|---|---|---|---|---|---|---|
-| Basic | BaseDeepSeek | 82/112 | 59/76 | 36/46 | 73/91 | 56/70 | 31/40 | 155/203 |
-| Retrieval-based | RepairAgent | 85/93 | 67/73 | 48/52 | 87/94 | 72/78 | 45/48 | 172/187 |
-| Retrieval-based | ReinFix | 118/181 | 83/120 | 47/66 | 118/171 | 89/128 | 47/63 | 236/352 |
-| Hybrid | ThinkRepair | 87/122 | 66/89 | 38/48 | 93/129 | 68/98 | 35/51 | 180/251 |
-| Feedback-based | ChatRepair | 103/156 | 51/67 | 45/56 | - | - | 42/53 | 145/209 |
-| Feedback-based | ContrastRepair | 133/182 | 86/124 | 60/69 | - | - | 48/66 | 181/248 |
-| Feedback-based | TSAPR | 108/146 | 87/115 | 50/66 | 116/150 | 89/114 | 46/63 | 224/296 |
-| Feedback-based | **DebugRepair** | 139/179 | 98/122 | 57/65 | **156/180** | **113/129** | **61/65** | **295/359** |
+<div align="center">
+
+<table>
+  <caption><b>Repair results of different repair scenarios for DebugRepair and baselines using DeepSeek-V3 as the backbone on Defects4J (# Correct/# Plausible).</b></caption>
+  <thead>
+    <tr>
+      <th rowspan="2" align="center">Category</th>
+      <th rowspan="2" align="center">APR Method</th>
+      <th colspan="3" align="center">Defects4J-V1.2</th>
+      <th colspan="3" align="center">Defects4J-V2.0</th>
+      <th rowspan="2" align="center">Total</th>
+    </tr>
+    <tr>
+      <th align="center">SF</th>
+      <th align="center">SH</th>
+      <th align="center">SL</th>
+      <th align="center">SF</th>
+      <th align="center">SH</th>
+      <th align="center">SL</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td align="center">Basic</td>
+      <td align="center">BaseDeepSeek</td>
+      <td align="center">82/112</td>
+      <td align="center">59/76</td>
+      <td align="center">36/46</td>
+      <td align="center">73/91</td>
+      <td align="center">56/70</td>
+      <td align="center">31/40</td>
+      <td align="center">155/203</td>
+    </tr>
+    <tr>
+      <td rowspan="2" align="center">Retrieval-based</td>
+      <td align="center">RepairAgent</td>
+      <td align="center">85/93</td>
+      <td align="center">67/73</td>
+      <td align="center">48/52</td>
+      <td align="center">87/94</td>
+      <td align="center">72/78</td>
+      <td align="center">45/48</td>
+      <td align="center">172/187</td>
+    </tr>
+    <tr>
+      <td align="center">ReinFix</td>
+      <td align="center">118/181</td>
+      <td align="center">83/120</td>
+      <td align="center">47/66</td>
+      <td align="center">118/171</td>
+      <td align="center">89/128</td>
+      <td align="center">47/63</td>
+      <td align="center">236/352</td>
+    </tr>
+    <tr>
+      <td align="center">Hybrid</td>
+      <td align="center">ThinkRepair</td>
+      <td align="center">87/122</td>
+      <td align="center">66/89</td>
+      <td align="center">38/48</td>
+      <td align="center">93/129</td>
+      <td align="center">68/98</td>
+      <td align="center">35/51</td>
+      <td align="center">180/251</td>
+    </tr>
+    <tr>
+      <td rowspan="4" align="center">Feedback-based</td>
+      <td align="center">ChatRepair</td>
+      <td align="center">103/156</td>
+      <td align="center">51/67</td>
+      <td align="center">45/56</td>
+      <td align="center">-</td>
+      <td align="center">-</td>
+      <td align="center">42/53</td>
+      <td align="center">145/209</td>
+    </tr>
+    <tr>
+      <td align="center">ContrastRepair</td>
+      <td align="center">133/182</td>
+      <td align="center">86/124</td>
+      <td align="center">60/69</td>
+      <td align="center">-</td>
+      <td align="center">-</td>
+      <td align="center">48/66</td>
+      <td align="center">181/248</td>
+    </tr>
+    <tr>
+      <td align="center">TSAPR</td>
+      <td align="center">108/146</td>
+      <td align="center">87/115</td>
+      <td align="center">50/66</td>
+      <td align="center">116/150</td>
+      <td align="center">89/114</td>
+      <td align="center">46/63</td>
+      <td align="center">224/296</td>
+    </tr>
+    <tr>
+      <td align="center"><b>DebugRepair</b></td>
+      <td align="center"><b>139/179</b></td>
+      <td align="center"><b>98/122</b></td>
+      <td align="center"><b>57/65</b></td>
+      <td align="center"><b>156/180</b></td>
+      <td align="center"><b>113/129</b></td>
+      <td align="center"><b>61/65</b></td>
+      <td align="center"><b>295/359</b></td>
+    </tr>
+  </tbody>
+</table>
+
+</div>
