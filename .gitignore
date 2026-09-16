@@ -2,3 +2,9 @@ __pycache__/
 *.py[cod]
 .pytest_cache/
 .venv/
+.env
+debug/
+log/
+output/
+temp/
+tools/java-instrumenter/build/

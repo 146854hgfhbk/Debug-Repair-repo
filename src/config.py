@@ -38,14 +38,19 @@ class BasicConfig:
     THREAD_COUNT = int(os.getenv("DEBUGREPAIR_BUG_WORKERS", "1"))
 
 class LLMConfig:
-    LLM_MODEL = "replace_with_model_name_do_not_use_symbol_except_underline_or_dash"
+    LLM_MODEL = os.getenv("DEBUGREPAIR_LLM_LABEL", "").strip()
 
-    BASE_URL = "replace_with_base_url"
-    MODEL = "replace_with_model"
-    API_KEY = "replace_with_your_api_key"
-    REASONING_EFFORT = os.getenv("DEBUGREPAIR_LLM_REASONING_EFFORT", "medium")
+    BASE_URL = os.getenv(
+        "DEBUGREPAIR_LLM_BASE_URL",
+        os.getenv("OPENAI_BASE_URL", os.getenv("OPENAI_API_BASE", "")),
+    ).strip()
+    MODEL = os.getenv("DEBUGREPAIR_LLM_MODEL", "").strip()
+    API_KEY = os.getenv(
+        "DEBUGREPAIR_LLM_API_KEY", os.getenv("OPENAI_API_KEY", "")
+    ).strip()
+    REASONING_EFFORT = os.getenv("DEBUGREPAIR_LLM_REASONING_EFFORT", "").strip()
 
-    TEMPERATURE = 1.0
+    TEMPERATURE = float(os.getenv("DEBUGREPAIR_LLM_TEMPERATURE", "1.0"))
     MAX_RETRIES = 5
     TIMEOUT_LIMIT = int(os.getenv("DEBUGREPAIR_LLM_TIMEOUT", "120"))
 
@@ -54,13 +59,21 @@ class LLMConfig:
 
 
 class InstrumentationLLMConfig:
-    BASE_URL = os.getenv("DEBUGREPAIR_INSTRUMENT_LLM_BASE_URL", "")
-    MODEL = os.getenv("DEBUGREPAIR_INSTRUMENT_LLM_MODEL", "")
-    API_KEY = os.getenv("DEBUGREPAIR_INSTRUMENT_LLM_API_KEY", "")
+    BASE_URL = os.getenv(
+        "DEBUGREPAIR_INSTRUMENT_LLM_BASE_URL", LLMConfig.BASE_URL
+    ).strip()
+    MODEL = os.getenv(
+        "DEBUGREPAIR_INSTRUMENT_LLM_MODEL", LLMConfig.MODEL
+    ).strip()
+    API_KEY = os.getenv(
+        "DEBUGREPAIR_INSTRUMENT_LLM_API_KEY", LLMConfig.API_KEY
+    ).strip()
     REASONING_EFFORT = os.getenv(
-        "DEBUGREPAIR_INSTRUMENT_LLM_REASONING_EFFORT", "high"
-    )
-    PROVIDER = os.getenv("DEBUGREPAIR_INSTRUMENT_LLM_PROVIDER", "openai")
+        "DEBUGREPAIR_INSTRUMENT_LLM_REASONING_EFFORT", ""
+    ).strip()
+    PROVIDER = os.getenv(
+        "DEBUGREPAIR_INSTRUMENT_LLM_PROVIDER", "openai"
+    ).strip().lower()
     TEMPERATURE = None
 
 class HyperParamConfig:

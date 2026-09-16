@@ -9636,13 +9636,20 @@
     "failing_tests": [
       {
         "test_method_name": "testOptionGroupLong",
-        "failing_line": null,
-        "failing_function": null,
+        "failing_line": "assertEquals(\"selected option\", \"bar\", group.getSelected());",
+        "failing_function": "    public void testOptionGroupLong() throws Exception\n    {\n        OptionGroup group = new OptionGroup();\n        group.addOption(OptionBuilder.withLongOpt(\"foo\").create());\n        group.addOption(OptionBuilder.withLongOpt(\"bar\").create());\n\n        Options options = new Options();\n        options.addOptionGroup(group);\n\n        CommandLine cl = parser.parse(options, new String[] { \"--bar\" });\n\n        assertTrue(cl.hasOption(\"bar\"));\n        assertEquals(\"selected option\", \"bar\", group.getSelected());\n    }",
         "failure_message": "junit.framework.ComparisonFailure: selected option expected:<bar> but was:<null>",
         "test_file_path": "org.apache.commons.cli.BasicParserTest",
-        "sliced_test": null,
-        "dependencies": {},
-        "full_test": "Source code not available"
+        "test_source_file_path": "org.apache.commons.cli.ParserTestCase",
+        "sliced_test": "    public void testOptionGroupLong() throws Exception {\n        OptionGroup group = new OptionGroup();\n        group.addOption(OptionBuilder.withLongOpt(\"foo\").create());\n        group.addOption(OptionBuilder.withLongOpt(\"bar\").create());\n        Options options = new Options();\n        options.addOptionGroup(group);\n        CommandLine cl = parser.parse(options, new String[] { \"--bar\" });\n        assertEquals(\"selected option\", \"bar\", group.getSelected());\n    }",
+        "dependencies": {
+          "methods": [],
+          "variables": [
+            "protected CommandLineParser parser;",
+            "protected Options options;"
+          ]
+        },
+        "full_test": "public void testOptionGroupLong() throws Exception {\\n OptionGroup group = new OptionGroup();\\n group.addOption(OptionBuilder.withLongOpt(\"foo\").create());\\n group.addOption(OptionBuilder.withLongOpt(\"bar\").create());\\n\\n Options options = new Options();\\n options.addOptionGroup(group);\\n\\n CommandLine cl = parser.parse(options, new String[] { \"--bar\" });\\n\\n assertTrue(cl.hasOption(\"bar\"));\\n assertEquals(\"selected option\", \"bar\", group.getSelected());\\n }"
       }
     ]
   },
@@ -10110,7 +10117,9 @@
           "methods": [],
           "variables": []
         },
-        "full_test": "public void test2947660() {\\n AbstractCategoryItemRenderer r = new LineAndShapeRenderer();\\n assertNotNull(r.getLegendItems());\\n assertEquals(0, r.getLegendItems().getItemCount());\\n\\n DefaultCategoryDataset dataset = new DefaultCategoryDataset();\\n CategoryPlot plot = new CategoryPlot();\\n plot.setDataset(dataset);\\n plot.setRenderer(r);\\n assertEquals(0, r.getLegendItems().getItemCount());\\n\\n dataset.addValue(1.0, \"S1\", \"C1\");\\n LegendItemCollection lic = r.getLegendItems();\\n assertEquals(1, lic.getItemCount());\\n assertEquals(\"S1\", lic.get(0).getLabel());\\n }"
+        "full_test": "public void test2947660() {\\n AbstractCategoryItemRenderer r = new LineAndShapeRenderer();\\n assertNotNull(r.getLegendItems());\\n assertEquals(0, r.getLegendItems().getItemCount());\\n\\n DefaultCategoryDataset dataset = new DefaultCategoryDataset();\\n CategoryPlot plot = new CategoryPlot();\\n plot.setDataset(dataset);\\n plot.setRenderer(r);\\n assertEquals(0, r.getLegendItems().getItemCount());\\n\\n dataset.addValue(1.0, \"S1\", \"C1\");\\n LegendItemCollection lic = r.getLegendItems();\\n assertEquals(1, lic.getItemCount());\\n assertEquals(\"S1\", lic.get(0).getLabel());\\n }",
+        "purification_status": "validated",
+        "purification_diagnostic": "candidate compiled and preserved the trigger failure"
       }
     ]
   },
@@ -12721,12 +12730,15 @@
         "failing_function": "    public void testOffsetWithInputOffset() throws Exception\n    {\n        final JsonFactory f = new JsonFactory();\n        JsonLocation loc;\n        JsonParser p;\n        // 3 spaces before, 2 after, just for padding\n        byte[] b = \"   { }  \".getBytes(\"UTF-8\");\n\n        // and then peel them off\n        p = f.createParser(b, 3, b.length-5);\n        assertToken(JsonToken.START_OBJECT, p.nextToken());\n\n        loc = p.getTokenLocation();\n        assertEquals(0L, loc.getByteOffset());\n        assertEquals(-1L, loc.getCharOffset());\n        assertEquals(1, loc.getLineNr());\n        assertEquals(1, loc.getColumnNr());\n        \n        loc = p.getCurrentLocation();\n        assertEquals(1L, loc.getByteOffset());\n        assertEquals(-1L, loc.getCharOffset());\n        assertEquals(1, loc.getLineNr());\n        assertEquals(2, loc.getColumnNr());\n\n        p.close();\n    }",
         "failure_message": "junit.framework.AssertionFailedError: expected:<0> but was:<3>",
         "test_file_path": "com.fasterxml.jackson.core.json.TestLocation",
-        "sliced_test": "    public void testOffsetWithInputOffset() throws Exception {\n        final JsonFactory f = new JsonFactory();\n        JsonLocation loc;\n        JsonParser p;\n        byte[] b = \"   { }  \".getBytes(\"UTF-8\");\n        p = f.createParser(b, 3, b.length-5);\n        loc = p.getTokenLocation();\n        assertEquals(0L, loc.getByteOffset());\n    }",
+        "sliced_test": "public void testOffsetWithInputOffset() throws Exception\n    {\n        final JsonFactory f = new JsonFactory();\n        JsonLocation loc;\n        JsonParser p;\n        // 3 spaces before, 2 after, just for padding\n        byte[] b = \"   { }  \".getBytes(\"UTF-8\");\n\n        // and then peel them off\n        p = f.createParser(b, 3, b.length-5);\n        assertToken(JsonToken.START_OBJECT, p.nextToken());\n\n        loc = p.getTokenLocation();\n        assertEquals(0L, loc.getByteOffset());\n        assertEquals(-1L, loc.getCharOffset());\n        assertEquals(1, loc.getLineNr());\n        assertEquals(1, loc.getColumnNr());\n        \n        loc = p.getCurrentLocation();\n        assertEquals(1L, loc.getByteOffset());\n        assertEquals(-1L, loc.getCharOffset());\n        assertEquals(1, loc.getLineNr());\n        assertEquals(2, loc.getColumnNr());\n\n        p.close();\n    }",
         "dependencies": {
           "methods": [],
-          "variables": []
+          "variables": [],
+          "info": "candidate compiled but did not preserve the stable trigger failure"
         },
-        "full_test": "public void testOffsetWithInputOffset() throws Exception {\\n final JsonFactory f = new JsonFactory();\\n JsonLocation loc;\\n JsonParser p;\\n // 3 spaces before, 2 after, just for padding\\n byte[] b = \" { } \".getBytes(\"UTF-8\");\\n\\n // and then peel them off\\n p = f.createParser(b, 3, b.length-5);\\n assertToken(JsonToken.START_OBJECT, p.nextToken());\\n\\n loc = p.getTokenLocation();\\n assertEquals(0L, loc.getByteOffset());\\n assertEquals(-1L, loc.getCharOffset());\\n assertEquals(1, loc.getLineNr());\\n assertEquals(1, loc.getColumnNr());\\n \\n loc = p.getCurrentLocation();\\n assertEquals(1L, loc.getByteOffset());\\n assertEquals(-1L, loc.getCharOffset());\\n assertEquals(1, loc.getLineNr());\\n assertEquals(2, loc.getColumnNr());\\n\\n p.close();\\n }"
+        "full_test": "public void testOffsetWithInputOffset() throws Exception {\\n final JsonFactory f = new JsonFactory();\\n JsonLocation loc;\\n JsonParser p;\\n // 3 spaces before, 2 after, just for padding\\n byte[] b = \" { } \".getBytes(\"UTF-8\");\\n\\n // and then peel them off\\n p = f.createParser(b, 3, b.length-5);\\n assertToken(JsonToken.START_OBJECT, p.nextToken());\\n\\n loc = p.getTokenLocation();\\n assertEquals(0L, loc.getByteOffset());\\n assertEquals(-1L, loc.getCharOffset());\\n assertEquals(1, loc.getLineNr());\\n assertEquals(1, loc.getColumnNr());\\n \\n loc = p.getCurrentLocation();\\n assertEquals(1L, loc.getByteOffset());\\n assertEquals(-1L, loc.getCharOffset());\\n assertEquals(1, loc.getLineNr());\\n assertEquals(2, loc.getColumnNr());\\n\\n p.close();\\n }",
+        "purification_status": "fallback",
+        "purification_diagnostic": "candidate compiled but did not preserve the stable trigger failure"
       }
     ]
   },

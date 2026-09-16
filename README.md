@@ -1,181 +1,221 @@
 # DebugRepair
 
-This project is a Java bug repair tool based on Defects4J and large language models (LLMs).
+DebugRepair is an LLM-based automated program repair system for Java bugs. This
+repository contains the paper-aligned Defects4J functional core: test semantic
+purification data, hybrid instrumentation, runtime trace collection,
+conversation-based repair, validation, and patch augmentation.
 
-## Directory Structure
+The included corpus contains 483 single-function bugs from Defects4J 1.2 and
+2.0. QuixBugs and HumanEval-Java experiments described in the paper are not
+included in this repository.
 
-- `src/` - main source code directory
-  - `config.py` - global configuration
-  - `client.py` - execution entry point
-  - `runner.py` - execution flow and multi-thread scheduling
-  - `defs/bug_info.py` - loads bug metadata from JSON files
-  - `llm/` - LLM client, prompt builder, and prompt templates
-  - `pipeline/` - pipelines for different processing modes
-  - `utils/` - utilities for bug list building, output collection, logging, validation, etc.
-- `data/` - Defects4J preprocessed data
-  - `location/` - location files
-  - `bug_info/` - bug metadata JSON files
-- `defects4j/` - Defects4J framework directory
+## Repository Layout
 
-## Environment Setup
+- `src/`: repair workflow, prompts, model clients, instrumentation, trace
+  collection, and validation.
+- `data/`: the 483-bug corpus, perfect fault locations, and purified tests.
+- `tools/java-instrumenter/`: the JavaParser helper used for normalization,
+  method replacement, and rule-based instrumentation.
+- `tests/`: unit and regression tests.
+- `validator-server.py` and `validator-worker.py`: optional remote Defects4J
+  validation service.
+- `run.sh`: Linux launcher that loads a private `.env` file.
 
-### Python Environment
+## Requirements
 
-Recommended Python version: `3.10+`.
+Use Linux for the full experiment. Windows is suitable for unit tests, but
+Defects4J projects and historical build systems are substantially more reliable
+on Linux.
+
+Required software:
+
+- Python 3.10 or newer; Python 3.11 is recommended.
+- A JDK providing both `java` and `javac`. JDK 8 is the safest default for
+  the Defects4J 2.0 projects.
+- Defects4J 2.0 and its Perl dependencies.
+- Access to an OpenAI-compatible chat-completions API for the repair model.
+- Git and network access during setup. The JavaParser builder downloads one
+  pinned Maven dependency and verifies its SHA-256 checksum.
+
+## 1. Install Defects4J 2.0
+
+Follow the upstream Defects4J prerequisites, then install the version used by
+this corpus:
 
 ```bash
-python -m venv .venv
-.\.venv\Scripts\activate
-python -m pip install --upgrade pip
-python -m pip install -r requirements.txt
+git clone https://github.com/rjust/defects4j.git "$HOME/defects4j"
+cd "$HOME/defects4j"
+git checkout v2.0.0
+cpanm --installdeps .
+./init.sh
+export PATH="$HOME/defects4j/framework/bin:$PATH"
+defects4j query -p Chart -q 'bug.id,tests.trigger' >/dev/null
 ```
 
-If you use Conda:
+The final command must exit successfully. A different installation location is
+fine; configure its executable explicitly in step 3.
 
-```bash
-conda create -n info_debug python=3.11 -y
-conda activate info_debug
-python -m pip install -r requirements.txt
-```
-
-If you do not use `requirements.txt`, install the minimum required packages manually:
-
-```bash
-python -m pip install openai tiktoken javalang
-```
-
-### Defects4J
-
-This project depends on the Defects4J command-line tool.
-
-1. Install Defects4J and make sure the `defects4j` command is available.
-2. Clone or install it into a local directory, for example `~/defects4j`.
-3. Set `BasicConfig.D4J_PATH` in `src/config.py` to the Defects4J root directory:
-
-```python
-class BasicConfig:
-    D4J_PATH = os.path.expanduser("~/defects4j")
-```
-
-If your Defects4J installation path is different from `~/defects4j`, update it accordingly.
-
-### Platform Note
-
-The project is primarily developed for Linux. Running on Windows may produce issues due to command and path differences.
-
-## `config.py` Parameter Guide
-
-### BasicConfig
-
-- `PLATFORM` - execution platform, currently set to `linux`.
-- `BASE_PATH` - absolute path to the `src` directory.
-- `D4J_PATH` - root path for Defects4J.
-- `DEBUG_PATH` - directory for exported patches and debug data.
-- `LOG_PATH` - LLM log output directory.
-- `OUTPUT_PATH` - result output directory.
-- `TEMP_PATH` - temporary working directory.
-- `LOC_PATH` - path to `data/location`, containing `.buggy.lines` files.
-- `BUG_INFO_PATH` - path to `data/bug_info`.
-- `TEST_PATH` - path to `data/test_functions`.
-- `INDEX_MAP_JSON` - bug index mapping file path.
-- `BUG_INFO_JSON` - bug metadata JSON file path.
-- `FAILING_TEST_JSON` - failing test metadata JSON file path.
-- `FILE_HASH_JSON` - file hash metadata JSON file path.
-- `OUTPUT_FILE_NAME` - base log filename.
-- `DEBUG_MODE` - enable debug mode (export patches, write LLM logs).
-- `THREAD_COUNT` - number of concurrent threads.
-
-### LLMConfig
-
-- `LLM_MODEL` - local model label for log directory naming.
-- `BASE_URL` - base URL for the LLM API.
-- `MODEL` - the model identifier used for requests.
-- `API_KEY` - LLM API key.
-- `TEMPERATURE` - sampling temperature.
-- `MAX_RETRIES` - maximum retry count.
-- `TIMEOUT_LIMIT` - timeout in seconds for each request.
-- `TOKEN_ENCODING_NAME` - token encoding name.
-- `MAX_TOKEN` - maximum token limit.
-
-### HyperParamConfig
-
-- `MAX_ITER` - number of debug repair attempts after direct repair.
-- `MAX_EPOCH` - number of epochs.
-- `AUGMENT_SIZE` - augmentation size.
-- `INSERT_MAX_ATTEMPT` - maximum insert-print attempts.
-
-### ValidatorConfig
-
-- `TRIGGER_TEST_TIMEOUT_LIMIT` - timeout for trigger tests (seconds).
-- `FULL_TEST_TIMEOUT_LIMIT` - timeout for full test suite (seconds).
-- `COLLECT_OUTPUT_TIMEOUT_LIMIT` - timeout for `COLLECT_OUTPUT` mode (seconds).
-
-### ClientConfig
-
-- `DEFAULT` - run the default bug list if enabled.
-- `RANGE` - run a continuous bug range if enabled.
-- `CUSTOM` - run a custom bug list if enabled.
-- `RANGE_START` / `RANGE_END` - start and end indices for range mode.
-- `CUSTOM_LIST` - custom bug index list.
-
-## Usage
-
-### 1. Prepare Data
-
-Ensure the JSON files in `data/bug_info` exist and are valid, and that `data/location` contains `.buggy.lines` files.
-
-### 2. Adjust Configuration
-
-- `BasicConfig.MODE`: set the run mode.
-- `BasicConfig.DEBUG_MODE`: set to `True` to enable debug logs and patch exports.
-- `BasicConfig.THREAD_COUNT`: control concurrency.
-- `ClientConfig`: control which bugs are executed.
-
-### 3. Run the Project
+## 2. Install Python and JavaParser Dependencies
 
 From the repository root:
 
 ```bash
-python src/client.py
+python3 -m venv .venv
+source .venv/bin/activate
+python -m pip install --upgrade pip
+python -m pip install -r requirements.txt
+python tools/java-instrumenter/build.py --force --print-classpath
+python -m pytest -q
 ```
 
-### 4. Output Locations
+The JavaParser build command downloads JavaParser Core 3.26.3, verifies its
+pinned checksum, and compiles the helper locally. Generated classes and the JAR
+are cached under `tools/java-instrumenter/build/` and are ignored by Git.
 
-The project writes results to:
-
-- `output/` - result logs
-- `log/` - LLM call logs
-- `debug/` - exported debug patches or files
-- `temp/` - temporary run directories
-
-### 5. Example Configuration
-
-Run the default bug list:
+The full 483-method JavaParser round-trip test is optional:
 
 ```bash
-python src/client.py
+DEBUGREPAIR_FULL_CORPUS=1 python -m pytest \
+  tests/test_repository_java_instrumentation.py::test_every_repository_method_round_trips_through_javaparser -q
 ```
 
-Use a specific bug range by modifying `ClientConfig` in `src/config.py`:
+## 3. Configure the Model and Defects4J
 
-```python
-class ClientConfig:
-    DEFAULT = False
-    RANGE = True
-    CUSTOM = False
-    RANGE_START = 1
-    RANGE_END = 50
+Create a private configuration file:
+
+```bash
+cp .env.example .env
 ```
 
-Use a custom list:
+Edit `.env` and set these required values:
 
-```python
-class ClientConfig:
-    DEFAULT = False
-    RANGE = False
-    CUSTOM = True
-    CUSTOM_LIST = [1, 2, 5, 10]
+```bash
+DEBUGREPAIR_LLM_LABEL=paper-backbone
+DEBUGREPAIR_LLM_BASE_URL=https://provider.example/v1
+DEBUGREPAIR_LLM_MODEL=replace-with-model-id
+DEBUGREPAIR_LLM_API_KEY=replace-with-api-key
+DEBUGREPAIR_DEFECTS4J=/home/USER/defects4j/framework/bin/defects4j
 ```
+
+`DEBUGREPAIR_LLM_LABEL` is a filesystem-safe experiment label used for output
+directories. It is not sent to the API. The default repair temperature is
+`1.0`, matching the paper.
+
+By default, repair and instrumentation use the same endpoint, model, and API
+key. To use a separate instrumentation model, set the optional
+`DEBUGREPAIR_INSTRUMENT_LLM_*` variables shown in `.env.example`. Set
+`DEBUGREPAIR_INSTRUMENT_LLM_PROVIDER=anthropic` only for an Anthropic-native
+instrumentation endpoint; otherwise keep the default `openai`.
+
+Never commit `.env`; it is ignored by Git.
+
+## 4. Validate the Installation Without Calling an LLM
+
+```bash
+bash run.sh --check-config
+```
+
+This command does not send an API request. It checks:
+
+- required model settings;
+- Java and `javac`;
+- the Defects4J executable, unless remote validation is enabled;
+- the 483-entry data index; and
+- the JavaParser helper build.
+
+Resolve every reported error before starting an experiment.
+
+## 5. Run One Smoke Bug
+
+Start with index 1, which maps to `Chart-1`:
+
+```bash
+bash run.sh --bugs 1
+```
+
+This command does call the configured model API and executes Defects4J
+compilation and tests. Results are written under:
+
+```text
+output/INFO_DEBUG/<label>/output_log.json
+log/<label>/llm_log.jsonl
+debug/
+temp/
+```
+
+Run several selected indices with:
+
+```bash
+bash run.sh --bugs 1 2 3
+```
+
+Completed bugs with terminal status `success` or `fail` are skipped when the
+same command is resumed.
+
+## 6. Run the Full 483-Bug Experiment
+
+Only start the full run after the single-bug smoke test succeeds:
+
+```bash
+bash run.sh
+```
+
+With no `--bugs` argument, `ClientConfig.DEFAULT` runs all 483 bugs. This is
+an expensive experiment: a bug may use multiple repair, instrumentation, and
+augmentation requests, plus repeated Defects4J test executions. Control
+parallelism conservatively with:
+
+```bash
+DEBUGREPAIR_BUG_WORKERS=4
+```
+
+Put that setting in `.env` rather than editing source.
+
+## Runtime Workflow
+
+The default `INFO_DEBUG` mode performs:
+
+1. direct repair using the buggy method, purified failing test, and error data;
+2. LLM instrumentation with AST normalization and Defects4J compilation gates;
+3. deterministic JavaParser instrumentation after failed LLM attempts;
+4. execution of exactly one purified failing test to collect a runtime trace;
+5. validator-guided conversational repair;
+6. trigger-test and full-suite validation; and
+7. eight alternative patch-generation attempts after finding a plausible patch.
+
+The paper budget is configured in `src/config.py`: six debugging sessions,
+four repair rounds per session including direct repair, ten instrumentation
+attempts, and eight augmentation requests. Perfect fault locations are marked
+with `// Buggy Line`.
+
+## Optional Remote Validation
+
+To keep model calls on one host and run Defects4J on another, start
+`validator-server.py` on the validation host with
+`DEBUGREPAIR_VALIDATOR_TOKEN`, `DEBUGREPAIR_VALIDATOR_WORK_ROOT`, and the
+local Defects4J environment configured. On the model host set:
+
+```bash
+DEBUGREPAIR_VALIDATOR_URL=http://validator-host:9001
+DEBUGREPAIR_VALIDATOR_TOKEN=replace-with-a-shared-secret
+```
+
+When `DEBUGREPAIR_VALIDATOR_URL` is set, compilation, runtime trace collection,
+and patch validation are delegated to that service. Put TLS and access control
+in front of the service when it is reachable beyond a trusted private network.
+
+## Troubleshooting
+
+- `Missing credentials`: populate all required `DEBUGREPAIR_LLM_*` values
+  and start through `bash run.sh`.
+- `Defects4J executable not found`: set `DEBUGREPAIR_DEFECTS4J` to the
+  executable itself, not the Defects4J directory.
+- `Unable to build the JavaParser instrumenter`: verify both `java` and
+  `javac` are on `PATH`, then rerun the explicit build command from step 2.
+- `Purified test unavailable`: verify that the checked-out repository contains
+  the current `data/bug_info/failing_test.json`.
+- Old Java projects fail under a recent JDK: retry with JDK 8 and set
+  `JAVA_HOME` before running Defects4J.
 
 ## Results
 
