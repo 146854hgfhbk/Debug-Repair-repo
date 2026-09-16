@@ -1,374 +1,544 @@
-from defs.bug_info import BugInfo
-from config import BasicConfig, LLMConfig, ValidatorConfig
-import subprocess
 import os
+import shutil
+import subprocess
+import tempfile
 
+from config import BasicConfig, LLMConfig, ValidatorConfig
+from defs.bug_info import BugInfo
+from utils.java_rule_instrumenter import replace_method_source
 from utils.timeout_utils import timeout
 
-from typing import Optional
+
+TRIGGER_START_MARKER = "\nNow runtime output for trigger test begin:\n"
+SINGLE_TEST_RUNNER_SOURCE = """\
+import java.lang.reflect.Method;
+import java.util.Enumeration;
+
+public final class SingleTestRunner {
+    private SingleTestRunner() {
+    }
+
+    public static void main(String[] args) throws Exception {
+        if (args.length != 2) {
+            throw new IllegalArgumentException("Expected test class and method name.");
+        }
+        Class<?> testClass = Class.forName(args[0]);
+        boolean successful;
+        try {
+            successful = runJUnit4(testClass, args[1]);
+        } catch (ClassNotFoundException missingJUnit4) {
+            successful = runJUnit3(testClass, args[1]);
+        }
+        if (!successful) {
+            System.exit(1);
+        }
+    }
+
+    private static boolean runJUnit4(Class<?> testClass, String methodName)
+            throws Exception {
+        Class<?> coreClass = Class.forName("org.junit.runner.JUnitCore");
+        Class<?> requestClass = Class.forName("org.junit.runner.Request");
+        Class<?> resultClass = Class.forName("org.junit.runner.Result");
+        Object request = requestClass
+                .getMethod("method", Class.class, String.class)
+                .invoke(null, testClass, methodName);
+        Object core = coreClass.getDeclaredConstructor().newInstance();
+        Object result = coreClass.getMethod("run", requestClass).invoke(core, request);
+        Iterable<?> failures = (Iterable<?>) resultClass
+                .getMethod("getFailures")
+                .invoke(result);
+        for (Object failure : failures) {
+            printFailure(failure);
+        }
+        return (Boolean) resultClass.getMethod("wasSuccessful").invoke(result);
+    }
+
+    private static boolean runJUnit3(Class<?> testClass, String methodName)
+            throws Exception {
+        Class<?> testCaseClass = Class.forName("junit.framework.TestCase");
+        Class<?> resultClass = Class.forName("junit.framework.TestResult");
+        if (!testCaseClass.isAssignableFrom(testClass)) {
+            throw new IllegalArgumentException(
+                    "JUnit 3 test does not extend TestCase: " + testClass.getName());
+        }
+        Object test = testClass.getDeclaredConstructor().newInstance();
+        testCaseClass.getMethod("setName", String.class).invoke(test, methodName);
+        Object result = resultClass.getDeclaredConstructor().newInstance();
+        testCaseClass.getMethod("run", resultClass).invoke(test, result);
+        printFailures((Enumeration<?>) resultClass.getMethod("failures").invoke(result));
+        printFailures((Enumeration<?>) resultClass.getMethod("errors").invoke(result));
+        return (Boolean) resultClass.getMethod("wasSuccessful").invoke(result);
+    }
+
+    private static void printFailures(Enumeration<?> failures) throws Exception {
+        while (failures.hasMoreElements()) {
+            printFailure(failures.nextElement());
+        }
+    }
+
+    private static void printFailure(Object failure) throws Exception {
+        System.err.println(failure.toString());
+        try {
+            Method trace = failure.getClass().getMethod("getTrace");
+            System.err.println(trace.invoke(failure));
+        } catch (NoSuchMethodException noJUnit4Trace) {
+            Method trace = failure.getClass().getMethod("trace");
+            System.err.println(trace.invoke(failure));
+        }
+    }
+}
+"""
+
+
+def check_instrumented_compiles(
+    bug_id: str,
+    bug_info: BugInfo,
+    instrumented_method: str,
+) -> tuple[bool, str]:
+    """Compile an instrumented method in an isolated Defects4J checkout."""
+    # Check for remote delegation
+    try:
+        from utils import remote_validation
+        if remote_validation.is_remote_validation_enabled():
+            result = remote_validation.request_remote_validation(
+                "check_instrumented_compiles", bug_id, instrumented_method
+            )
+            return tuple(result)
+    except ImportError:
+        pass
+    except remote_validation.RemoteValidationError:
+        raise
+
+    if not instrumented_method or not instrumented_method.strip():
+        return False, "instrumented method is empty"
+
+    project, defect_id = bug_id.split("-", 1)
+    compile_root = os.path.join(
+        BasicConfig.TEMP_PATH,
+        BasicConfig.MODE,
+        LLMConfig.LLM_MODEL,
+        "instrumentation_compile",
+    )
+    os.makedirs(compile_root, exist_ok=True)
+    checkout_path = tempfile.mkdtemp(prefix=f"{bug_id}-", dir=compile_root)
+
+    try:
+        checkout = _run_defects4j(
+            [
+                "checkout",
+                "-p",
+                project,
+                "-v",
+                f"{defect_id}b",
+                "-w",
+                checkout_path,
+            ]
+        )
+        if checkout.returncode != 0:
+            return False, _command_diagnostic("checkout", checkout)
+
+        source_dir = _export_directory(checkout_path, "dir.src.classes")
+        source_file = os.path.join(
+            checkout_path,
+            source_dir,
+            _buggy_source_relative_path(bug_id),
+        )
+        _replace_buggy_method(source_file, bug_info, instrumented_method)
+
+        compile_result = _run_defects4j(["compile"], cwd=checkout_path)
+        if compile_result.returncode != 0:
+            return False, _command_diagnostic("compile", compile_result)
+        return True, ""
+    except (OSError, ValueError, RuntimeError, subprocess.SubprocessError) as exc:
+        return False, f"instrumentation compile check failed: {exc}"
+    finally:
+        shutil.rmtree(checkout_path, ignore_errors=True)
+
 
 @timeout(ValidatorConfig.COLLECT_OUTPUT_TIMEOUT_LIMIT)
-def collect_output(
-        bug_id: str,
-        bug_info: BugInfo,
-        instrumented_method: str,
-    ) -> str:
-    # 获取bug的项目和编号
-    project = bug_id.split('-')[0]
-    id = bug_id.split('-')[1]
-
-    test_class, test_function_name = _get_test_info(project, id)
-
-    temp_path = os.path.join(BasicConfig.TEMP_PATH, BasicConfig.MODE, LLMConfig.LLM_MODEL, "test_"+bug_id)
-    print(temp_path)
-
+def _collect_output_local(
+    bug_id: str,
+    bug_info: BugInfo,
+    instrumented_method: str,
+) -> str:
+    """Local implementation: Run one purified trigger against an instrumented buggy method."""
+    project, defect_id = bug_id.split("-", 1)
+    temp_path = os.path.join(
+        BasicConfig.TEMP_PATH,
+        BasicConfig.MODE,
+        LLMConfig.LLM_MODEL,
+        "test_" + bug_id,
+    )
     _delete_dir(temp_path)
 
-    subprocess.run(f"defects4j checkout -p {project} -v {id}b -w {temp_path}", shell=True)
-    testmethods = os.popen(f"defects4j export -w {temp_path} -p tests.trigger").readlines()
-
-
-    # -----------------------------------------------------
-    # 获取测试目录
-    test_dir = os.popen(f"defects4j export -p dir.src.tests -w {temp_path}").readlines()[-1].strip()
-    
-    # 获取测试文件路径
-    test_location = test_class.replace('.', '/') + '.java'
-    test_file_path = f"{temp_path}/{test_dir}/{test_location}"
-
-    # 加载并替换测试函数
-    test_function_code = _load_test_function_code(bug_info)
-    if test_function_code:
-        # 替换测试函数
-        success = _replace_test_function(test_file_path, test_function_name, test_function_code)
-        if not success:
-            print(f"[WARNING] 替换测试函数失败，将使用原测试函数")
-            # 如果替换失败，至少在原函数中添加调试输出
-            _add_print_to_function(test_file_path, test_function_name, buggy_code=False)
-    else:
-        # 没有新的测试函数代码，只在原函数中添加调试输出
-        _add_print_to_function(test_file_path, test_function_name, buggy_code=False)
-    # -----------------------------------------------------
-    
-
-    #获取src目录
     try:
-        source_dir = os.popen(f"defects4j export -p dir.src.classes -w {temp_path}").readlines()[-1].strip()
-    except IndexError:
-        print(f"无法获取源代码目录: {temp_path}")
-        source_dir = ""
+        checkout = _run_defects4j(
+            [
+                "checkout",
+                "-p",
+                project,
+                "-v",
+                f"{defect_id}b",
+                "-w",
+                temp_path,
+            ]
+        )
+        _require_success("checkout", checkout)
 
-    
-    with open(f"{BasicConfig.LOC_PATH}/{bug_id}.buggy.lines", "r") as f:
-        locs = f.read()
+        trigger_export = _run_defects4j(
+            ["export", "-p", "tests.trigger", "-w", temp_path]
+        )
+        _require_success("trigger export", trigger_export)
+        test_class, test_method, purified_test, test_source_class = _select_purified_trigger(
+            bug_info,
+            _parse_trigger_tests(trigger_export.stdout),
+        )
 
-    loc = set([x.split("#")[0] for x in locs.splitlines() if x.strip()])  # 过滤空行, 并截断#后面的内容
+        test_dir = _export_directory(temp_path, "dir.src.tests")
+        test_file = os.path.join(
+            temp_path,
+            test_dir,
+            test_source_class.replace(".", os.sep) + ".java",
+        )
+        if not _replace_test_function(
+            test_file,
+            test_method,
+            purified_test,
+        ):
+            raise RuntimeError(
+                f"Failed to replace purified test {test_class}::{test_method}"
+            )
 
-    if not loc:
-        print(f"无法从 .buggy.lines 文件中找到源文件路径 (Bug ID: {bug_id})")
+        source_dir = _export_directory(temp_path, "dir.src.classes")
+        source_file = os.path.join(
+            temp_path,
+            source_dir,
+            _buggy_source_relative_path(bug_id),
+        )
+        patched_source = _replace_buggy_method(
+            source_file,
+            bug_info,
+            instrumented_method,
+        )
+        _write_debug_preview(bug_id, patched_source)
+
+        _, output = _run_and_collect_output(
+            test_class,
+            test_method,
+            temp_path,
+        )
+        return output
+    finally:
         _delete_dir(temp_path)
-        return False, "无法从 .buggy.lines 文件中找到源文件路径"
-    
-    loc = loc.pop()
-    
+
+
+def collect_output(
+    bug_id: str,
+    bug_info: BugInfo,
+    instrumented_method: str,
+) -> str:
+    """Run one purified trigger against an instrumented buggy method."""
+    # Check for remote delegation
     try:
-        with open(f"{temp_path}/{source_dir}/{loc}", 'r') as f:
-            source = f.read().split('\n')
-    except:
-        with open(f"{temp_path}/{source_dir}/{loc}" 'r', encoding='ISO-8859-1') as f:
-            source = f.read().split('\n')
-    
-    # 向源码插入补丁
-    patch_lines = instrumented_method.splitlines()
-    source = "\n".join(source[:bug_info.start_line - 1] + patch_lines + source[bug_info.end_line:])
+        from utils import remote_validation
+        if remote_validation.is_remote_validation_enabled():
+            result = remote_validation.request_remote_validation(
+                "collect_output", bug_id, instrumented_method
+            )
+            return result
+    except ImportError:
+        pass
+    except remote_validation.RemoteValidationError:
+        raise
 
-    # 调试模式则导出预览文件
-    if BasicConfig.DEBUG_MODE:
-        debug_filename = f"debug_patched_{bug_id}.java"
-        print(f"\n[DEBUG] 正在将应用补丁后的代码导出到: {os.path.abspath(debug_filename)}")
-        try:
-            if os.path.exists(BasicConfig.DEBUG_PATH) == False:
-                os.mkdir(BasicConfig.DEBUG_PATH)
-            with open(f"{BasicConfig.DEBUG_PATH}/{debug_filename}", "w", encoding='utf-8') as debug_f:
-                debug_f.write(source)
-            print(f"[DEBUG] 导出成功")
-        except Exception as e:
-            print(f"[DEBUG] 导出失败: {e}")
-    
-    # 写入插入补丁后的程序
+    return _collect_output_local(bug_id, bug_info, instrumented_method)
+
+
+def _run_defects4j(args, cwd=None):
+    return subprocess.run(
+        [ValidatorConfig.DEFECTS4J_EXECUTABLE, *args],
+        cwd=cwd,
+        capture_output=True,
+        text=True,
+        timeout=ValidatorConfig.COLLECT_OUTPUT_TIMEOUT_LIMIT,
+        check=False,
+        env=os.environ.copy(),
+    )
+
+
+def _require_success(stage: str, completed: subprocess.CompletedProcess) -> None:
+    if completed.returncode != 0:
+        raise RuntimeError(_command_diagnostic(stage, completed))
+
+
+def _command_diagnostic(stage: str, completed: subprocess.CompletedProcess) -> str:
+    detail = (completed.stderr or completed.stdout or "").strip()
+    return f"Defects4J {stage} failed ({completed.returncode}): {detail}"
+
+
+def _export_directory(temp_path: str, property_name: str) -> str:
+    completed = _run_defects4j(
+        ["export", "-p", property_name, "-w", temp_path]
+    )
+    _require_success(f"{property_name} export", completed)
+    lines = [line.strip() for line in completed.stdout.splitlines() if line.strip()]
+    if not lines:
+        raise RuntimeError(f"Defects4J exported an empty {property_name}")
+    return lines[-1]
+
+
+def _buggy_source_relative_path(bug_id: str) -> str:
+    location_path = os.path.join(BasicConfig.LOC_PATH, f"{bug_id}.buggy.lines")
+    with open(location_path, "r", encoding="utf-8") as stream:
+        paths = {
+            line.split("#", 1)[0]
+            for line in stream.read().splitlines()
+            if line.strip()
+        }
+    if len(paths) != 1:
+        raise ValueError(
+            f"Expected one buggy source file for {bug_id}, found {len(paths)}"
+        )
+    return paths.pop()
+
+
+def _read_java_source(path: str) -> tuple[str, str]:
     try:
-        with open(f"{temp_path}/{source_dir}/{loc}", 'w') as f:
-            f.write(source)
-    except:
-        with open(f"{temp_path}/{source_dir}/{loc}", 'w', encoding='ISO-8859-1') as f:
-            f.write(source)
+        with open(path, "r", encoding="utf-8") as stream:
+            return stream.read(), "utf-8"
+    except UnicodeDecodeError:
+        with open(path, "r", encoding="ISO-8859-1") as stream:
+            return stream.read(), "ISO-8859-1"
 
-    success, output = _run_and_collect_output(source, testmethods, test_class, temp_path)
-    _delete_dir(temp_path)
-    return output
 
-def _run_and_collect_output(source, testmethods, test_class, temp_path):
-    env = os.environ.copy()
-    
-    # 1. 首先导出 classpath
-    print("[DEBUG] STEP 1: START - defects4j export")
-    cp_result = subprocess.run(
-        "defects4j export -p cp.test -o cp_test.txt",
-        cwd=temp_path,
-        capture_output=True,
-        text=True,
-        shell=True,
-        check=True,
-        env=env
+def _replace_buggy_method(
+    source_file: str,
+    bug_info: BugInfo,
+    replacement_method: str,
+) -> str:
+    source, encoding = _read_java_source(source_file)
+    source_lines = source.splitlines()
+    if not 1 <= bug_info.start_line <= bug_info.end_line <= len(source_lines):
+        raise ValueError(
+            "Buggy method line range is outside the checked-out source: "
+            f"{bug_info.start_line}-{bug_info.end_line} of {len(source_lines)}"
+        )
+
+    patched_source = "\n".join(
+        source_lines[: bug_info.start_line - 1]
+        + replacement_method.splitlines()
+        + source_lines[bug_info.end_line :]
     )
-    print(f"[DEBUG] STEP 1: SUCCESS - defects4j export")
-    
-    # 2. 编译
-    print("[DEBUG] STEP 2: START - defects4j compile")
-    compile_result = subprocess.run(
-        "defects4j compile",
-        cwd=temp_path,
-        capture_output=True,
-        text=True,
-        shell=True,
-        check=False,  # 改为 check=False 以便查看错误
-        env=env
+    with open(source_file, "w", encoding=encoding) as stream:
+        stream.write(patched_source)
+    return patched_source
+
+
+def _parse_trigger_tests(exported: str) -> list[str]:
+    triggers = []
+    for line in exported.splitlines():
+        selector = line.strip()
+        if selector.startswith("---"):
+            selector = selector[3:].strip()
+        if "::" in selector:
+            triggers.append(selector)
+    if not triggers:
+        raise ValueError("Defects4J exported no trigger tests")
+    return triggers
+
+
+def _select_purified_trigger(
+    bug_info: BugInfo,
+    exported_triggers: list[str],
+) -> tuple[str, str, str, str]:
+    candidates = {}
+    for test in getattr(bug_info, "failing_tests", []) or []:
+        test_class = _normalize_test_class(test.get("test_file_path") or "")
+        test_method = (test.get("test_method_name") or "").strip()
+        if test_class and test_method:
+            test_source_class = _normalize_test_class(
+                test.get("test_source_file_path") or test_class
+            ).strip()
+            candidates[(test_class, test_method)] = (
+                (test.get("sliced_test") or "").strip(),
+                test_source_class,
+            )
+
+    matched_empty = []
+    for selector in exported_triggers:
+        test_class, test_method = selector.split("::", 1)
+        key = (_normalize_test_class(test_class), test_method.strip())
+        if key not in candidates:
+            continue
+        purified_test, test_source_class = candidates[key]
+        if purified_test:
+            return key[0], key[1], purified_test, test_source_class
+        matched_empty.append(f"{key[0]}::{key[1]}")
+
+    if matched_empty:
+        raise ValueError(
+            "Purified test unavailable for exported trigger(s): "
+            + ", ".join(matched_empty)
+        )
+    raise ValueError(
+        f"No purified metadata for an exported trigger of {bug_info.bug_id}"
     )
-    if compile_result.returncode != 0:
-        print(f"[DEBUG] 编译失败，返回码: {compile_result.returncode}")
-        print(f"[DEBUG] 编译输出: {compile_result.stdout}")
-        print(f"[DEBUG] 编译错误: {compile_result.stderr}")
-        return False, f"编译失败: {compile_result.stderr}"
-    else:
-        print("[DEBUG] STEP 2: SUCCESS - defects4j compile")
-    
-    # 3. 检查测试类文件是否存在
-    print(f"[DEBUG] STEP 3: 检查测试类 {test_class}")
-    
-    # 获取测试目录
-    test_dir_result = subprocess.run(
-        "defects4j export -p dir.src.tests",
-        cwd=temp_path,
-        capture_output=True,
-        text=True,
-        shell=True,
-        env=env
+
+
+def _load_test_function_code(
+    bug_info: BugInfo,
+    test_class: str,
+    test_function_name: str,
+) -> str:
+    """Return the purified method matching the selected Defects4J trigger."""
+    normalized_class = _normalize_test_class(test_class)
+    for test in getattr(bug_info, "failing_tests", []) or []:
+        candidate_class = _normalize_test_class(test.get("test_file_path") or "")
+        candidate_method = (test.get("test_method_name") or "").strip()
+        if candidate_class != normalized_class or candidate_method != test_function_name:
+            continue
+        sliced_test = (test.get("sliced_test") or "").strip()
+        if sliced_test:
+            return sliced_test
+
+    raise ValueError(
+        "Purified test unavailable for "
+        f"{bug_info.bug_id}: {test_class}::{test_function_name}"
     )
-    test_dir = test_dir_result.stdout.strip()
-    print(f"[DEBUG] 测试目录: {test_dir}")
-    
-    # 将包名转换为路径
-    test_class_path = test_class.replace('.', '/') + '.java'
-    test_file_path = f"{temp_path}/{test_dir}/{test_class_path}"
-    print(f"[DEBUG] 预期测试文件路径: {test_file_path}")
-    print(f"[DEBUG] 文件是否存在: {os.path.exists(test_file_path)}")
-    
-    # 4. 运行测试
-    print("[DEBUG] STEP 4: START - java run test")
-    print(f"[DEBUG] 尝试使用 JUnitCore 运行 {test_class}")
-    run_re = subprocess.run(
-        f"java -cp $(cat cp_test.txt) org.junit.runner.JUnitCore {test_class} > test_output.txt 2>&1",
-        capture_output=True,
-        text=True,
-        timeout=30,
-        cwd=temp_path,
-        shell=True,
-        env=env
-    )
-    
-    # 5. 读取输出
-    output_path = f"{temp_path}/test_output.txt"
-    if os.path.exists(output_path):
-        with open(output_path, 'r') as f:
-            output = _extract_debug_info(f.read())
-
-    return run_re.returncode == 0, output
-
-def _get_test_info(project, id):
-    with open(f"{BasicConfig.D4J_PATH}/framework/projects/{project}/trigger_tests/{id}",'r') as f:
-        test_location=f.readline()
-
-    test_location=test_location.split(' ')[1]
-    test_function_name=test_location.split("::")[1].strip()
-    test_class=test_location.split("::")[0].strip()
-
-    return test_class,test_function_name
-
-def _load_test_function_code(bug_info: BugInfo) -> Optional[str]:
-    candidate_path = os.path.join(BasicConfig.TEST_PATH, f"{bug_info.bug_id}.java")
-    if os.path.exists(candidate_path):
-        with open(candidate_path, "r", encoding="utf-8") as f:
-            content = f.read()
-        if content.strip():
-            return content
-
-    # for test in bug_info.trigger_test or []:
-    #     for key in ("failing_function", "sliced_test"):
-    #         snippet = test.get(key)
-    #         if isinstance(snippet, str) and snippet.strip():
-    #             return snippet.strip()
-    return None
 
 
-def _delete_dir(path: str):
-    """删除目录"""
-    print(f"[DEBUG] 删除目录: {path}")
-
-    if not path or not os.path.exists(path):
-        return
-    if BasicConfig.PLATFORM == "windows":
-        subprocess.run(f"rd /s /q {path}", shell=True)
-    elif BasicConfig.PLATFORM == "linux":
-        subprocess.run(f"rm -rf {path}", shell=True)
+def _normalize_test_class(value: str) -> str:
+    normalized = value.strip().replace("/", ".").replace("\\", ".")
+    if normalized.endswith(".java"):
+        normalized = normalized[:-5]
+    return normalized
 
 
-# 以下代码不知道是否合理
-# 在 _run_and_collect_output 函数之前添加这些函数
-
-def _add_print_to_function(file_path, function_name, added_code=None, buggy_code=False):
-    """向指定函数添加调试输出，如果是buggy_code则替换整个函数"""
+def _replace_test_function(
+    test_file_path: str,
+    test_function_name: str,
+    new_test_code: str,
+) -> bool:
     try:
-        with open(file_path, 'r', encoding='ISO-8859-1') as f:
-            java_code_lines = f.readlines()
-        
-        indexes = []
-        if not buggy_code:
-            # 对于测试函数，查找 " function_name("
-            search_pattern = ' ' + function_name + '('
-        else:
-            # 对于buggy函数，直接查找函数名
-            search_pattern = function_name
-        
-        for index, line in enumerate(java_code_lines):
-            if (search_pattern in line) and java_code_lines[index].strip()[0] != '/' and java_code_lines[index].strip()[0] != '*':
-                indexes.append(index)
-        
-        if len(indexes) != 1:
-            print(f"[WARNING] 在文件 {file_path} 中未找到函数 {function_name} 或找到多个匹配")
-            return False
-        
-        left_num = 1
-        nl = False
-        if java_code_lines[indexes[0]].strip()[-1] != '{':
-            nl = True
-        
-        current_line = indexes[0] + 1
-        while left_num > 0 and current_line < len(java_code_lines):
-            for char in java_code_lines[current_line].strip():
-                if char == '}':
-                    left_num -= 1
-                if char == '{':
-                    if nl:
-                        nl = False
-                    else:
-                        left_num += 1
-            current_line += 1
-        
-        if indexes[0] < 0 or java_code_lines[current_line-1].strip()[-1] != "}":
-            return False
-        
-        # 如果是buggy代码，用added_code替换整个函数
-        if buggy_code and added_code:
-            added_lines1 = added_code.split('\n')
-            added_lines = [line + '\n' for line in added_lines1]
-            java_code_lines[indexes[0]:current_line] = added_lines
-        
-        # 如果不是buggy代码，添加调试输出
-        if not buggy_code:
-            sprint = 'System.out.println("\\nNow runtime output for trigger test begin:\\n");'
-            
-            # 添加测试函数开始标记
-            change_true = False
-            super_ex = False
-            
-            for i in range(indexes[0], current_line):
-                if 'super(' in java_code_lines[i] or 'this(' in java_code_lines[i]:
-                    super_ex = True
-                    for it in range(len(java_code_lines[i])):
-                        if java_code_lines[i][it] == ';':
-                            java_code_lines[i] = java_code_lines[i][:it + 1] + sprint + java_code_lines[i][it + 1:]
-                            change_true = True
-                            break
-                    break
-            
-            if not super_ex:
-                for i in range(indexes[0], current_line):
-                    for it in range(len(java_code_lines[i])):
-                        if java_code_lines[i][it] == '{':
-                            java_code_lines[i] = java_code_lines[i][:it + 1] + sprint + java_code_lines[i][it + 1:]
-                            change_true = True
-                            break
-                    if change_true:
-                        break
-        
-        with open(file_path, 'w', encoding='ISO-8859-1') as f:
-            f.write(''.join(java_code_lines))
-        
+        source, encoding = _read_java_source(test_file_path)
+        replaced = replace_method_source(
+            source,
+            test_function_name,
+            new_test_code,
+            TRIGGER_START_MARKER,
+        )
+        with open(test_file_path, "w", encoding=encoding) as stream:
+            stream.write(replaced)
         return True
-    except Exception as e:
-        print(f"[ERROR] 添加调试输出到函数失败: {e}")
+    except Exception as exc:
+        print(f"[ERROR] Failed to replace purified test method: {exc}")
         return False
 
-def _replace_test_function(test_file_path, test_function_name, new_test_code):
-    """替换测试文件中的测试函数"""
+
+def _run_and_collect_output(test_class, test_function_name, temp_path):
+    compile_result = _run_defects4j(["compile"], cwd=temp_path)
+    if compile_result.returncode != 0:
+        return False, _command_diagnostic("compile", compile_result)
+
+    classpath_export = _run_defects4j(
+        ["export", "-p", "cp.test"],
+        cwd=temp_path,
+    )
+    if classpath_export.returncode != 0:
+        return False, _command_diagnostic("test classpath export", classpath_export)
+    classpath_lines = [
+        line.strip()
+        for line in classpath_export.stdout.splitlines()
+        if line.strip()
+    ]
+    if not classpath_lines:
+        return False, "Defects4J exported an empty test classpath"
+
+    runner_dir = tempfile.mkdtemp(prefix=".debugrepair-runner-", dir=temp_path)
     try:
-        # 首先在new_test_code中添加调试输出
-        debug_line = 'System.out.println("\\nNow runtime output for trigger test begin:\\n");'
-        lines = new_test_code.split('\n')
-        
-        # 找到函数体的开始位置
-        for i, line in enumerate(lines):
-            if '{' in line:
-                # 在{后面添加调试输出
-                brace_pos = line.find('{')
-                lines[i] = line[:brace_pos+1] + debug_line + line[brace_pos+1:]
-                break
-        
-        modified_test_code = '\n'.join(lines)
-        
-        # 使用_add_print_to_function替换整个测试函数
-        return _add_print_to_function(test_file_path, test_function_name, modified_test_code, buggy_code=True)
-    except Exception as e:
-        print(f"[ERROR] 替换测试函数失败: {e}")
-        return False
-    
+        runner_source = os.path.join(runner_dir, "SingleTestRunner.java")
+        with open(runner_source, "w", encoding="utf-8") as stream:
+            stream.write(SINGLE_TEST_RUNNER_SOURCE)
+
+        test_classpath = classpath_lines[-1]
+        runner_compile = subprocess.run(
+            ["javac", "-cp", test_classpath, runner_source],
+            cwd=temp_path,
+            capture_output=True,
+            text=True,
+            timeout=ValidatorConfig.COLLECT_OUTPUT_TIMEOUT_LIMIT,
+            check=False,
+            env=os.environ.copy(),
+        )
+        if runner_compile.returncode != 0:
+            return False, _command_diagnostic("single-test runner compile", runner_compile)
+
+        runtime_classpath = os.pathsep.join([test_classpath, runner_dir])
+        test_result = subprocess.run(
+            [
+                "java",
+                "-cp",
+                runtime_classpath,
+                "SingleTestRunner",
+                test_class,
+                test_function_name,
+            ],
+            cwd=temp_path,
+            capture_output=True,
+            text=True,
+            timeout=ValidatorConfig.TRIGGER_TEST_TIMEOUT_LIMIT,
+            check=False,
+            env=os.environ.copy(),
+        )
+        combined_output = "\n".join(
+            part for part in (test_result.stdout, test_result.stderr) if part
+        )
+        return test_result.returncode == 0, _extract_debug_info(combined_output)
+    finally:
+        shutil.rmtree(runner_dir, ignore_errors=True)
+
+
+def _write_debug_preview(bug_id: str, source: str) -> None:
+    if not BasicConfig.DEBUG_MODE:
+        return
+    os.makedirs(BasicConfig.DEBUG_PATH, exist_ok=True)
+    debug_path = os.path.join(BasicConfig.DEBUG_PATH, f"debug_patched_{bug_id}.java")
+    with open(debug_path, "w", encoding="utf-8") as stream:
+        stream.write(source)
+
+
+def _delete_dir(path: str) -> None:
+    if path and os.path.isdir(path):
+        shutil.rmtree(path)
+
+
 def _extract_debug_info(output: str) -> str:
-    """从测试输出中提取调试信息（与原代码逻辑一致）"""
-    lines = output.split('\n')
-    
-    # 查找调试标记的开始位置
-    trigger_start = None
-    for i, line in enumerate(lines):
-        if "Now runtime output for trigger test begin:" in line:
-            trigger_start = i
-            break
-    
+    lines = output.splitlines()
+    trigger_start = next(
+        (
+            index
+            for index, line in enumerate(lines)
+            if "Now runtime output for trigger test begin:" in line
+        ),
+        None,
+    )
     if trigger_start is None:
         return ""
-    
-    # 从trigger_start开始，查找以"========Test Case"开头的行
-    test_case_start = None
-    for i in range(trigger_start, len(lines)):
-        if lines[i].strip().startswith("========Test Case"):
-            test_case_start = i
-            break
-    
-    if test_case_start is None:
-        # 如果没找到"========Test Case"，从trigger_start开始到结束
-        test_case_start = trigger_start
-    
-    # 查找错误信息的开始位置（以"at "开头的行）
-    error_start = None
-    for i in range(test_case_start, len(lines)):
-        if lines[i].strip().startswith("at "):
-            error_start = i
-            break
-    
-    if error_start is not None:
-        # 如果有错误信息，提取到错误信息之前
-        result_lines = lines[test_case_start:error_start]
-    else:
-        # 如果没有错误信息，提取到结束
-        result_lines = lines[test_case_start:]
-    
-    return '\n'.join(result_lines)
+
+    test_case_start = next(
+        (
+            index
+            for index in range(trigger_start, len(lines))
+            if lines[index].strip().startswith("========Test Case")
+        ),
+        trigger_start,
+    )
+    error_start = next(
+        (
+            index
+            for index in range(test_case_start, len(lines))
+            if lines[index].strip().startswith("at ")
+        ),
+        len(lines),
+    )
+    return "\n".join(lines[test_case_start:error_start])

@@ -16,16 +16,27 @@ class BugInfo:
     buggy_line_contents: List[str] = []
 
     def __init__(self, bug_id):
+        self.bug_id = bug_id
+        self.buggy_method = ""
+        self.trigger_test = ""
+        self.sliced_trigger_test = ""
+        self.error_log = ""
+        self.start_line = 0
+        self.end_line = 0
+        self.relative_buggy_lines = []
+        self.buggy_line_contents = []
+        self.failing_tests: List[Dict] = []
+
         bug_info = load_json(BasicConfig.BUG_INFO_JSON)
         failing_test = load_json(BasicConfig.FAILING_TEST_JSON)
-        file_hash = load_json(BasicConfig.FILE_HASH_JSON)
 
-        self.bug_id = bug_id
         self.buggy_method = bug_info[bug_id].get("buggy", "")
-        failing_tests = failing_test[bug_id].get("failing_tests", "")
-        self.trigger_test = self._build_full_test(failing_tests)
-        self.sliced_trigger_test = self._build_sliced_test(failing_tests)
-        self.error_log = self._build_error_log(failing_test[bug_id].get("failing_tests", []))
+        self.failing_tests = list(
+            failing_test[bug_id].get("failing_tests") or []
+        )
+        self.trigger_test = self._build_full_test(self.failing_tests)
+        self.sliced_trigger_test = self._build_sliced_test(self.failing_tests)
+        self.error_log = self._build_error_log(self.failing_tests)
 
         self.start_line = bug_info[bug_id].get("start", 0)
         self.end_line = bug_info[bug_id].get("end", 0)

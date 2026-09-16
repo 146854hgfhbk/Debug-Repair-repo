@@ -64,7 +64,7 @@ class Prompts:
         {instrumented_function}
         ```
         {runtime_output}
-        4) Feedback on the PREVIOUS attempt:
+        4) Feedback history from the current debugging session:
         ```
         {feedback}
         ```
@@ -74,7 +74,7 @@ class Prompts:
 
     # 构建 feedback 的 prompt
     FEEDBACK = """
-    The previous attempt to fix the bug was unsuccessful. Here is the feedback from the validator and the code that was submitted:
+    This repair attempt was unsuccessful. Here is the feedback from the validator and the code that was submitted:
     
     [Validator Feedback]
     {validator_feedback}
@@ -124,6 +124,10 @@ class Prompts:
         2) Filtered error log:
         ```
         {error_info}
+        ```
+        3) Perfect Fault Location:
+        ```
+        {fault_location}
         ```
     """
 

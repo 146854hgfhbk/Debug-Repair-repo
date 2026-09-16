@@ -6,6 +6,8 @@ from utils.build_bug_list import build_default_list, build_custom_list
 from utils.output_logger import update_time_consumed
 
 from typing import List, Optional
+import json
+import os
 import time
 import threading
 import queue
@@ -63,11 +65,39 @@ def run(bug_list: Optional[List[int]] = None):
         bug_ids = build_default_list()
     else:
         bug_ids = build_custom_list(bug_list)
+    bug_ids = filter_terminal_bugs(bug_ids)
     print(f"共{len(bug_ids)}个bug")
     print(bug_ids)
 
     # 多线程执行
     process_bugs_multithreaded(bug_ids, pipeline, llm_client, prompt_builder)
+
+
+def result_file_path():
+    from config import LLMConfig
+
+    return os.path.join(
+        BasicConfig.OUTPUT_PATH,
+        BasicConfig.MODE,
+        LLMConfig.LLM_MODEL,
+        BasicConfig.OUTPUT_FILE_NAME + ".json",
+    )
+
+
+def filter_terminal_bugs(bug_ids: List[str]) -> List[str]:
+    path = result_file_path()
+    if not os.path.exists(path):
+        return bug_ids
+    with open(path, "r", encoding="utf-8") as handle:
+        results = json.load(handle)
+    terminal = {
+        bug_id
+        for bug_id, result in results.items()
+        if result.get("status") in {"success", "fail"}
+    }
+    remaining = [bug_id for bug_id in bug_ids if bug_id not in terminal]
+    print(f"断点续跑: 跳过{len(terminal.intersection(bug_ids))}个已完成bug")
+    return remaining
 
 def process_single_bug(bug_id: int, pipeline_func, llm_client, prompt_builder):
     """处理单个bug的线程函数"""

@@ -5,6 +5,7 @@ from typing import Optional, List
 
 from utils.output_logger import output_log
 from utils.extract_code import extract_code_block
+from component.instrumentation_support import add_buggy_line_comments
 from utils.validate import validate_patch
 from typing import Tuple
 def direct_repair_pipeline(
@@ -42,7 +43,15 @@ def _llm_direct_repair(
     llm_client: LLMClient,
     prompt_builder: PromptBuilder
 ) -> Tuple[str, dict]:
-    prompt = prompt_builder.build_direct_repair_prompt(bug_info.buggy_method, bug_info.sliced_trigger_test, bug_info.error_log)
+    prompt_buggy_method = add_buggy_line_comments(
+        bug_info,
+        bug_info.buggy_method,
+    )
+    prompt = prompt_builder.build_direct_repair_prompt(
+        prompt_buggy_method,
+        bug_info.sliced_trigger_test,
+        bug_info.error_log,
+    )
     response, usage = llm_client.generate_response(prompt, "direct_repair")
 
     code_block = extract_code_block(response)

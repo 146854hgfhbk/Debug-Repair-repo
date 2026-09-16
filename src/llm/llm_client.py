@@ -1,6 +1,10 @@
-from config import LLMConfig
+from config import InstrumentationLLMConfig, LLMConfig
 from openai import OpenAI
 from typing import Any, Dict, Tuple
+import threading
+
+
+_log_lock = threading.Lock()
 
 class LLMClient:
     def __init__(self):
@@ -8,6 +12,21 @@ class LLMClient:
             raise ImportError("OpenAI import失败")
 
         self.client = OpenAI(api_key=LLMConfig.API_KEY, base_url=LLMConfig.BASE_URL)
+
+        # Conditionally create instrumentation client based on provider
+        if InstrumentationLLMConfig.PROVIDER == "anthropic":
+            from llm.anthropic_instrumentation_client import AnthropicInstrumentationClient
+            self.instrumentation_client = AnthropicInstrumentationClient(
+                api_key=InstrumentationLLMConfig.API_KEY,
+                base_url=InstrumentationLLMConfig.BASE_URL,
+                timeout=LLMConfig.TIMEOUT_LIMIT,
+            )
+        else:
+            # Default to OpenAI
+            self.instrumentation_client = OpenAI(
+                api_key=InstrumentationLLMConfig.API_KEY,
+                base_url=InstrumentationLLMConfig.BASE_URL,
+            )
 
         print(f"LLMClient 已为模型 '{LLMConfig.MODEL}' 初始化。")
 
@@ -24,17 +43,45 @@ class LLMClient:
                 - content: 响应内容
                 - usage_info: token 用量信息
         """
+        is_instrumentation = prompt_name == "insert_print"
+        config = InstrumentationLLMConfig if is_instrumentation else LLMConfig
         print(f"====== BEGIN: Sending Request to LLM : {prompt_name} ======")
-        print(f"Model: {LLMConfig.MODEL}, Temperature: {LLMConfig.TEMPERATURE}")
+        print(f"Model: {config.MODEL}, Temperature: {config.TEMPERATURE}")
+
+        # Use Anthropic adapter for instrumentation when provider=anthropic
+        if is_instrumentation and InstrumentationLLMConfig.PROVIDER == "anthropic":
+            from llm.anthropic_instrumentation_client import AnthropicInstrumentationClient
+            if isinstance(self.instrumentation_client, AnthropicInstrumentationClient):
+                for attempt in range(LLMConfig.MAX_RETRIES):
+                    try:
+                        content, usage_dict = self.instrumentation_client.generate_response(
+                            messages=msg,
+                            model=config.MODEL,
+                            max_tokens=LLMConfig.MAX_TOKEN,
+                            effort=config.REASONING_EFFORT,
+                            temperature=config.TEMPERATURE,
+                        )
+                        self._log_to_file(prompt_name, msg, content, "response", usage_dict)
+                        return content, usage_dict
+                    except Exception as e:
+                        print(f"API 调用在第 {attempt + 1}/{LLMConfig.MAX_RETRIES} 次尝试时失败。错误: {e}")
+                return "", {}
+
+        # OpenAI path (for repair and provider=openai instrumentation)
+        client = self.instrumentation_client if is_instrumentation else self.client
 
         for attempt in range(LLMConfig.MAX_RETRIES):
             try:
-                response = self.client.chat.completions.create(
-                    model=LLMConfig.MODEL,
+                request = dict(
+                    model=config.MODEL,
                     messages=msg,
-                    temperature=LLMConfig.TEMPERATURE,
                     timeout=LLMConfig.TIMEOUT_LIMIT
                 )
+                if is_instrumentation and config.REASONING_EFFORT:
+                    request["reasoning_effort"] = config.REASONING_EFFORT
+                if config.TEMPERATURE is not None:
+                    request["temperature"] = config.TEMPERATURE
+                response = client.chat.completions.create(**request)
 
                 content = ""
                 try:
@@ -63,7 +110,7 @@ class LLMClient:
 
             except Exception as e:
                 print(f"API 调用在第 {attempt + 1}/{LLMConfig.MAX_RETRIES} 次尝试时失败。错误: {e}")
-                return "", {}
+        return "", {}
 
     def _parse_usage_info(self, raw_usage: Any) -> Dict[str, int]:
         """将模型返回的 usage 信息规范为简单的字典"""
@@ -107,9 +154,10 @@ class LLMClient:
             if not os.path.exists(f"{BasicConfig.LOG_PATH}/{LLMConfig.LLM_MODEL}"):
                 os.makedirs(f"{BasicConfig.LOG_PATH}/{LLMConfig.LLM_MODEL}")
 
-            with open(f"{BasicConfig.LOG_PATH}/{LLMConfig.LLM_MODEL}/llm_log.jsonl", "a", encoding="utf-8") as f:
-                json.dump(log_data, f, ensure_ascii=False)
-                f.write("\n")
+            with _log_lock:
+                with open(f"{BasicConfig.LOG_PATH}/{LLMConfig.LLM_MODEL}/llm_log.jsonl", "a", encoding="utf-8") as f:
+                    json.dump(log_data, f, ensure_ascii=False)
+                    f.write("\n")
         except:
             print("日志写入失败")
             pass

@@ -1,3 +1,7 @@
 openai
 tiktoken
 javalang
+tree-sitter==0.25.1
+tree-sitter-java==0.23.5
+pytest>=7.0
+anthropic

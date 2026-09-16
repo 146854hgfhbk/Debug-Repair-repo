@@ -3,6 +3,7 @@ from llm.llm_client import LLMClient
 from llm.prompt_builder import PromptBuilder
 
 from utils.extract_code import extract_code_block
+from component.instrumentation_support import add_buggy_line_comments
 from utils.validate import validate_patch
 from utils.output_logger import output_log
 from typing import Tuple, List, Optional
@@ -32,7 +33,7 @@ def patch_augment_pipeline(
         print("Direct Repair 失败, 代码块为空")
         output_log(bug_id, "patch_augment", code_block, "Failed -- llm no response or extract code block failed", usage)
         return False, "Failed -- llm no response or extract code block failed", "", usage
-    
+
     is_ok, msg = validate_patch(bug_id, code_block, bug_info)
     output_log(bug_id, "patch_augment", code_block, ("Plausible" if is_ok else "Failed -- ") + msg, usage)
     print("="*50)
@@ -44,10 +45,17 @@ def _llm_augment_patch(
     prompt_builder: PromptBuilder,
     plausible_patch: str
 ) -> Tuple[str, str]:
-    prompt = prompt_builder.build_augment_prompt(bug_info.buggy_method, bug_info.error_log, plausible_patch)
+    prompt_buggy_method = add_buggy_line_comments(
+        bug_info,
+        bug_info.buggy_method,
+    )
+    prompt = prompt_builder.build_augment_prompt(
+        prompt_buggy_method,
+        bug_info.error_log,
+        plausible_patch,
+    )
     response, usage = llm_client.generate_response(prompt, "patch augment")
 
     code_block = extract_code_block(response)
     print(f"Patch Augment 接收llm回应: {response}")
     return code_block, usage
-    

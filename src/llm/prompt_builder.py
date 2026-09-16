@@ -62,12 +62,14 @@ class PromptBuilder:
         test_context: str,
         error_info: str,
         start_marker: str,
-        end_marker: str
+        end_marker: str,
+        fault_location: str = ""
     ):
         prompt_text = Prompts.INSERT_PRINT.format(
             buggy_function=buggy_function,
             test_context=test_context,
             error_info=error_info,
+            fault_location=fault_location,
         )
 
         sys_msg = Prompts.INSERT_SYS_MSG.format(

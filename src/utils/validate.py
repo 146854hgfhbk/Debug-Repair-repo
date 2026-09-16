@@ -1,11 +1,115 @@
 from config import BasicConfig, LLMConfig, ValidatorConfig
 import os
+import signal
 import subprocess
+import time
 from defs.bug_info import BugInfo
 
 from typing import Tuple
 
 PLATFORM = BasicConfig.PLATFORM
+PROCESS_GROUP_GRACE_SECONDS = 2.0
+PROCESS_KILL_SIGNAL = getattr(signal, "SIGKILL", 9)
+
+
+def _process_group_exists(process_group_id: int) -> bool:
+    try:
+        os.killpg(process_group_id, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    return True
+
+
+def _terminate_process_group(child, grace_seconds=PROCESS_GROUP_GRACE_SECONDS):
+    if PLATFORM != "linux" or not hasattr(os, "killpg"):
+        if child.poll() is not None:
+            child.wait()
+            return
+        child.terminate()
+        try:
+            child.wait(timeout=grace_seconds)
+        except subprocess.TimeoutExpired:
+            child.kill()
+            child.wait()
+        return
+
+    # start_new_session=True makes the launched process the group leader, so
+    # its PID remains the PGID even if that leader exits before its children.
+    process_group_id = child.pid
+    if child.poll() is not None and not _process_group_exists(process_group_id):
+        child.wait()
+        return
+
+    try:
+        os.killpg(process_group_id, signal.SIGTERM)
+    except ProcessLookupError:
+        child.wait()
+        return
+
+    deadline = time.monotonic() + max(0, grace_seconds)
+    group_alive = _process_group_exists(process_group_id)
+    while group_alive:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            break
+        try:
+            child.wait(timeout=min(0.1, remaining))
+        except subprocess.TimeoutExpired:
+            pass
+        group_alive = _process_group_exists(process_group_id)
+
+    if group_alive:
+        try:
+            os.killpg(process_group_id, PROCESS_KILL_SIGNAL)
+        except ProcessLookupError:
+            pass
+
+    try:
+        child.wait(timeout=max(1.0, grace_seconds))
+    except subprocess.TimeoutExpired:
+        child.kill()
+        child.wait()
+
+
+def _run_defects4j(args, cwd=None):
+    command = [ValidatorConfig.DEFECTS4J_EXECUTABLE, *args]
+    child = subprocess.Popen(
+        command,
+        cwd=cwd,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        start_new_session=True,
+        env=os.environ.copy(),
+    )
+    try:
+        stdout, stderr = child.communicate(
+            timeout=ValidatorConfig.FULL_TEST_TIMEOUT_LIMIT
+        )
+    except subprocess.TimeoutExpired:
+        _terminate_process_group(child)
+        raise
+    return subprocess.CompletedProcess(
+        command,
+        child.returncode,
+        stdout=stdout,
+        stderr=stderr,
+    )
+
+
+def _stderr_path(temp_path: str) -> str:
+    return os.path.join(temp_path, "stderr.txt")
+
+
+def _read_source_lines(path: str):
+    try:
+        with open(path, "r", encoding="utf-8") as source_file:
+            return source_file.read().split("\n")
+    except UnicodeDecodeError:
+        with open(path, "r", encoding="ISO-8859-1") as source_file:
+            return source_file.read().split("\n")
 
 def validate_patch(
     bug_id: str,
@@ -15,6 +119,18 @@ def validate_patch(
     """
     验证补丁是否通过测试
     """
+    # Check for remote delegation
+    try:
+        from utils import remote_validation
+        if remote_validation.is_remote_validation_enabled():
+            result = remote_validation.request_remote_validation(
+                "validate_patch", bug_id, patch
+            )
+            return tuple(result)
+    except ImportError:
+        pass
+    except remote_validation.RemoteValidationError:
+        raise
 
     # 获取bug的项目和编号
     project = bug_id.split('-')[0]
@@ -24,12 +140,24 @@ def validate_patch(
     print(temp_path)
     _delete_dir(temp_path)
 
-    subprocess.run(f"defects4j checkout -p {project} -v {id}b -w {temp_path}", shell=True)
-    testmethods = os.popen(f"defects4j export -w {temp_path} -p tests.trigger").readlines()
+    checkout = _run_defects4j(
+        ["checkout", "-p", project, "-v", f"{id}b", "-w", temp_path]
+    )
+    if checkout.returncode != 0:
+        return False, "Checkout Fail: " + (checkout.stderr or checkout.stdout).strip()
+    trigger_export = _run_defects4j(
+        ["export", "-w", temp_path, "-p", "tests.trigger"]
+    )
+    if trigger_export.returncode != 0:
+        return False, "Trigger Export Fail: " + (trigger_export.stderr or trigger_export.stdout).strip()
+    testmethods = trigger_export.stdout.splitlines()
 
     #获取src目录
     try:
-        source_dir = os.popen(f"defects4j export -p dir.src.classes -w {temp_path}").readlines()[-1].strip()
+        source_export = _run_defects4j(
+            ["export", "-p", "dir.src.classes", "-w", temp_path]
+        )
+        source_dir = [line for line in source_export.stdout.splitlines() if line.strip()][-1].strip()
     except IndexError:
         print(f"无法获取源代码目录: {temp_path}")
         source_dir = ""
@@ -47,12 +175,8 @@ def validate_patch(
     
     loc = loc.pop()
     
-    try:
-        with open(f"{temp_path}/{source_dir}/{loc}", 'r') as f:
-            source = f.read().split('\n')
-    except:
-        with open(f"{temp_path}/{source_dir}/{loc}" 'r', encoding='ISO-8859-1') as f:
-            source = f.read().split('\n')
+    source_path = f"{temp_path}/{source_dir}/{loc}"
+    source = _read_source_lines(source_path)
     
     # 向源码插入补丁
     patch_lines = patch.splitlines()
@@ -96,8 +220,6 @@ def validate_patch(
         return False, message
 
 import javalang
-import time
-import signal
 
 def _run_test(source, testmethods, temp_path):
     buggy = False
@@ -118,13 +240,19 @@ def _run_test(source, testmethods, temp_path):
     # 运行触发测试
     for t in testmethods:
         print(t.strip())
-        cmd = f"defects4j test -w {temp_path}/ -t {t.strip()}"
+        cmd = [
+            ValidatorConfig.DEFECTS4J_EXECUTABLE,
+            "test",
+            "-w",
+            f"{temp_path}/",
+            "-t",
+            t.strip(),
+        ]
         Returncode = ""
-        error_file = open("stderr.txt", "wb")
+        error_file = open(_stderr_path(temp_path), "wb")
 
         child = subprocess.Popen(
             cmd, 
-            shell=True, 
             stdout=subprocess.PIPE, 
             stderr=error_file, 
             bufsize=-1,
@@ -149,7 +277,8 @@ def _run_test(source, testmethods, temp_path):
                 break
             # 3. 超时检测
             elif time.time() - while_begin > ValidatorConfig.TRIGGER_TEST_TIMEOUT_LIMIT:
-                child.kill()
+                _terminate_process_group(child)
+                error_file.close()
                 # os.killpg(os.getpgid(child.pid), signal.SIGTERM) # TODO : 这个写法可能有问题
                 print(f"检测到触发测试超时 (>{ValidatorConfig.TRIGGER_TEST_TIMEOUT_LIMIT}s)")
                 timed_out = True
@@ -169,13 +298,17 @@ def _run_test(source, testmethods, temp_path):
     # 运行全量测试
     if not buggy:
         print('通过触发测试, 运行全量测试')
-        cmd = f"defects4j test -w {temp_path}/"
+        cmd = [
+            ValidatorConfig.DEFECTS4J_EXECUTABLE,
+            "test",
+            "-w",
+            f"{temp_path}/",
+        ]
         Returncode = ""
         timed_out = False 
             
         child = subprocess.Popen(
             cmd, 
-            shell=True, 
             stdout=subprocess.PIPE, 
             stderr=subprocess.PIPE, 
             bufsize=-1,
@@ -199,7 +332,7 @@ def _run_test(source, testmethods, temp_path):
                 break
             # 3. 超时检测
             elif time.time() - while_begin > ValidatorConfig.FULL_TEST_TIMEOUT_LIMIT:
-                child.kill()
+                _terminate_process_group(child)
                 # os.killpg(os.getpgid(child.pid), signal.SIGTERM) # TODO : 这个写法可能有问题
                 print(f"检测到全量测试超时 (>{ValidatorConfig.FULL_TEST_TIMEOUT_LIMIT}s)")
                 timed_out = True

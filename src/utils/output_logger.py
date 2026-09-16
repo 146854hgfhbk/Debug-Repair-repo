@@ -1,6 +1,7 @@
 import json
 import os
 import threading
+import tempfile
 from config import BasicConfig, LLMConfig
 from typing import Optional, List
 
@@ -140,10 +141,20 @@ def _preprocess(bug_id: str):
 
 def _write_json(data: dict):
     """将数据写入json文件"""
-    with open(os.path.join(
+    path = os.path.join(
         BasicConfig.OUTPUT_PATH,
         BasicConfig.MODE,
         LLMConfig.LLM_MODEL,
         BasicConfig.OUTPUT_FILE_NAME + ".json"
-    ),'w') as f:
-        json.dump(data, f, indent=4)
+    )
+    directory = os.path.dirname(path)
+    fd, temporary_path = tempfile.mkstemp(prefix=".output_log.", suffix=".tmp", dir=directory)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            json.dump(data, f, indent=4)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(temporary_path, path)
+    finally:
+        if os.path.exists(temporary_path):
+            os.unlink(temporary_path)
