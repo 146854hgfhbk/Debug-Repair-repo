@@ -58,13 +58,33 @@ def exported_dir(checkout, property_name):
 
 
 def replace_method(source, method_name, replacement, marker):
+    repository_src = str(Path(__file__).resolve().parents[1] / "src")
+    if repository_src not in sys.path:
+        sys.path.insert(0, repository_src)
     from utils.java_rule_instrumenter import replace_method_source
 
     return replace_method_source(source, method_name, replacement, marker)
 
 
-def restore_source_and_clean(checkout, source_file, source):
-    source_file.write_text(source, encoding="utf-8")
+def read_java_source(source_file):
+    source_bytes = Path(source_file).read_bytes()
+    try:
+        return source_bytes.decode("utf-8"), "utf-8"
+    except UnicodeDecodeError:
+        return source_bytes.decode("iso-8859-1"), "iso-8859-1"
+
+
+def write_java_source(source_file, source, encoding):
+    try:
+        Path(source_file).write_bytes(source.encode(encoding))
+        return encoding
+    except UnicodeEncodeError:
+        Path(source_file).write_bytes(source.encode("utf-8"))
+        return "utf-8"
+
+
+def restore_source_and_clean(checkout, source_file, source, encoding):
+    write_java_source(source_file, source, encoding)
     run(["defects4j", "clean"], cwd=checkout, timeout=300)
 
 
@@ -74,6 +94,39 @@ def result_error(text):
 
 def normalized_failure_message(value):
     return " ".join((value or "").split())
+
+
+def test_source_class(record):
+    return (
+        record.get("test_source_file_path")
+        or record.get("test_file_path")
+        or ""
+    ).strip().replace("/", ".").replace("\\", ".")
+
+
+def test_method_source(record):
+    full_test = (record.get("full_test") or "").strip()
+    if full_test and full_test.lower() != "source code not available":
+        return record.get("full_test")
+    return record.get("failing_function") or ""
+
+
+def fallback_result(slicer_result, full_test):
+    diagnostic = slicer_result.get("diagnostic") or slicer_result.get("sliced_method") or ""
+    return {
+        "status": "fallback",
+        "sliced_method": full_test,
+        "dependencies": {"info": diagnostic},
+        "diagnostic": diagnostic,
+    }
+
+
+def metadata_unusable_reason(record):
+    if not (record.get("test_method_name") or "").strip():
+        return "missing test method"
+    if not (record.get("test_file_path") or "").strip():
+        return "missing test class"
+    return None
 
 
 def stable_failure_signature(value):
@@ -125,21 +178,21 @@ def audit_test(slicer, bug_id, record, audit_root, update_metadata=False):
     project, number = bug_id.split("-", 1)
     method = (record.get("test_method_name") or "").strip()
     test_class = (record.get("test_file_path") or "").strip().replace("/", ".")
+    source_class = test_source_class(record)
     failing_line = (record.get("failing_line") or "").strip()
     expected_failure = normalized_failure_message(record.get("failure_message"))
-    full_test = record.get("full_test") or record.get("failing_function") or ""
+    full_test = test_method_source(record)
     item = {
         "bug_id": bug_id,
         "test_class": test_class,
+        "test_source_class": source_class,
         "test_method": method,
         "has_failing_line": bool(failing_line),
         "status": "pending",
     }
-    if not method or not test_class:
-        item.update(status="metadata_unusable", diagnostic="missing class or method")
-        return item
-    if not failing_line:
-        item.update(status="metadata_unusable", diagnostic="missing failing_line")
+    unusable_reason = metadata_unusable_reason(record)
+    if unusable_reason:
+        item.update(status="metadata_unusable", diagnostic=unusable_reason)
         return item
 
     checkout = Path(tempfile.mkdtemp(prefix=f"{bug_id}-", dir=audit_root))
@@ -157,19 +210,22 @@ def audit_test(slicer, bug_id, record, audit_root, update_metadata=False):
         item["is_exported_trigger"] = selector in triggers
 
         test_dir = exported_dir(checkout, "dir.src.tests")
-        test_file = checkout / test_dir / Path(*test_class.split(".")).with_suffix(".java")
+        test_file = checkout / test_dir / Path(*source_class.split(".")).with_suffix(".java")
         item["test_file_exists"] = test_file.is_file()
         if not test_file.is_file():
             item.update(status="test_file_missing", diagnostic=str(test_file.relative_to(checkout)))
             return item
 
-        source = test_file.read_text(encoding="utf-8", errors="strict")
+        source, source_encoding = read_java_source(test_file)
+        source_encoding_box = [source_encoding]
 
         def validate_candidate(candidate, dependencies):
             patched_candidate = replace_method(
                 source, method, candidate, "JAVA_SLICER_VALIDATION_MARKER"
             )
-            test_file.write_text(patched_candidate, encoding="utf-8")
+            source_encoding_box[0] = write_java_source(
+                test_file, patched_candidate, source_encoding_box[0]
+            )
             try:
                 compile_result = run(
                     ["defects4j", "compile"], cwd=checkout, timeout=300
@@ -204,7 +260,9 @@ def audit_test(slicer, bug_id, record, audit_root, update_metadata=False):
                     "test_returncode": test_result.returncode,
                 }
             finally:
-                restore_source_and_clean(checkout, test_file, source)
+                restore_source_and_clean(
+                    checkout, test_file, source, source_encoding_box[0]
+                )
 
         results = slicer.analyze_test_with_dependencies(
             method, full_test, failing_line, str(test_file),
@@ -212,6 +270,8 @@ def audit_test(slicer, bug_id, record, audit_root, update_metadata=False):
         )
         if len(results) != 1:
             raise RuntimeError(f"expected one slicer result, got {len(results)}")
+        if results[0].get("status") == "error" and full_test.strip():
+            results[0] = fallback_result(results[0], full_test)
         sliced = results[0].get("sliced_method") or ""
         dependencies = results[0].get("dependencies") or {}
         item["original_chars"] = len(full_test)
@@ -234,7 +294,9 @@ def audit_test(slicer, bug_id, record, audit_root, update_metadata=False):
             sliced,
             "JAVA_SLICER_AUDIT_MARKER",
         )
-        test_file.write_text(patched, encoding="utf-8")
+        source_encoding_box[0] = write_java_source(
+            test_file, patched, source_encoding_box[0]
+        )
         compile_result = run(["defects4j", "compile"], cwd=checkout, timeout=300)
         item["compile_returncode"] = compile_result.returncode
         if compile_result.returncode:
